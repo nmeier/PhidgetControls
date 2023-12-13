@@ -112,19 +112,47 @@ class PhidgetWrapper(object):
 
 
 class PositionProducer(object):
+    # noinspection PyMethodMayBeStatic
     def getPosition(self):
-        raise
+        return None
 
 
 class StateProducer(object):
+    # noinspection PyMethodMayBeStatic
     def getState(self):
-        raise
+        # type: () -> object
+        return None
+
+
+class TrueStateProducer(object):
+    # noinspection PyMethodMayBeStatic
+    def getState(self):
+        # type: () -> object
+        return True
+
+
+class NotStateProducer(object):
+    def __init__(self, state_producer):
+        # type: (StateProducer) -> None
+        self.state_producer = state_producer
+
+    # noinspection PyMethodMayBeStatic
+    def getState(self):
+        # type: () -> bool
+        return not self.state_producer.getState()
 
 
 class DeltaProducer(object):
     def __init__(self, position_producer):
         # type: (PositionProducer) -> None
         self.position_producer = position_producer
+        self.position = None
+
+    def restart(self):
+        # type: () -> None
+        """
+        restart the delta calculation
+        """
         self.position = None
 
     def getDelta(self):
@@ -193,11 +221,11 @@ class ClickProducer(object):
 
 class Interaction(object):
     @staticmethod
-    def getPhidget(phidget_key):
+    def _getPhidget(phidget):
         # type: ( str ) -> Phidget
         from PhidgetControlsConfig import PHIDGETS
 
-        phidget_type, phidget_id = PHIDGETS[phidget_key]  # type: (type[Phidget], int)
+        phidget_type, phidget_id = PHIDGETS[phidget]  # type: (type[Phidget], int)
         return PhidgetWrapper(phidget_type, phidget_id)
 
     def tick(self):
@@ -205,9 +233,9 @@ class Interaction(object):
 
 
 class Rotate(Interaction):
-    def __init__(self, phidget_key, notch_size, xref, min_value, max_value, step):
+    def __init__(self, position_producer, notch_size, xref, min_value, max_value, step):
         # type: (str, int, str, Number, Number, Number) -> None
-        self.delta_producer = DeltaProducer(NotchedPositionProducer(self.getPhidget(phidget_key), notch_size))
+        self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), notch_size))
         self.min_value = min_value
         self.max_value = max_value
         self.step = step
@@ -229,48 +257,53 @@ class Rotate(Interaction):
         self.setter(self.ref, val)
 
 
-class SetDigits(Interaction):
-    def __init__(self, phidget_key, state_producer_phidget_key, xref, inc1, inc2, modulo):
-        # type: (str, str, str, int, int, int) -> None
-        self.delta_producer = DeltaProducer(NotchedPositionProducer(self.getPhidget(phidget_key), 10))
-        self.state_producer = self.getPhidget(state_producer_phidget_key)  # type: StateProducer
-        self.inc1 = inc1
-        self.inc2 = inc2
-        self.modulo = modulo
-        self.ref = XPLMFindDataRef(xref)
-        if isinstance(inc1, float):
-            self.getter = XPLMGetDataf
-            self.setter = XPLMSetDataf
+class SetDigit(Interaction):
+    def __init__(self, position_producer, if_state_producer, xref, digit):
+        # type: (str, Optional[str], str, int) -> None
+        self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), 10))
+        if if_state_producer:
+            if if_state_producer.startswith("!"):
+                self.if_state_producer = NotStateProducer(self._getPhidget(if_state_producer[1:]))
+            else:
+                self.if_state_producer = self._getPhidget(if_state_producer)
         else:
-            self.getter = XPLMGetDatai
-            self.setter = XPLMSetDatai
+            self.if_state_producer = TrueStateProducer()
+        self.digit = digit
+        self.ref = XPLMFindDataRef(xref)
+        self.getter = XPLMGetDatai
+        self.setter = XPLMSetDatai
 
     def tick(self):
+        if not self.if_state_producer.getState():
+            self.delta_producer.restart()
+            return
         delta = self.delta_producer.getDelta()
         if not delta:
             return
-        if self.state_producer.getState():
-            add = self.inc2
-        else:
-            add = self.inc1
         val = self.getter(self.ref)
-        remainder = val % self.modulo
-        quotient = int(val / self.modulo) * self.modulo
-        val = quotient + max(0, min(self.modulo - 1, remainder + delta * add))
+        increment_digit = 10 ** (self.digit-1)
+        modulo = increment_digit * 10
+        remainder = (val + delta*increment_digit) % modulo
+        quotient = int(val / modulo) * modulo
+        val = quotient + remainder
         self.setter(self.ref, val)
 
 
 class SetValue(Interaction):
     delta_producer = None  # type: DeltaProducer
 
-    def __init__(self, phidget_key, xref, inc, min_value, max_value):
-        # type: (Phidget, str, Number, Number, Number) -> None
-        self.delta_producer = DeltaProducer(NotchedPositionProducer(self.getPhidget(phidget_key), 10))
-        self.inc = inc
+    def __init__(self, position_producer, acceleration_state_producer, xref, increment, accelerated_increment,
+                 min_value, max_value):
+        # type: (Phidget, str, Optional[str], str, Number, Optional[Number], Number, Number) -> None
+        self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), 10))
+        self.state_producer = self._getPhidget(acceleration_state_producer) if acceleration_state_producer \
+            else StateProducer()  # type: StateProducer
+        self.increment = increment
+        self.accelerated_increment = accelerated_increment
         self.min = min_value
         self.max = max_value
         self.ref = XPLMFindDataRef(xref)
-        self.use_float = isinstance(inc, float)
+        self.use_float = isinstance(increment, float)
         if self.use_float:
             self.getter = XPLMGetDataf
             self.setter = XPLMSetDataf
@@ -282,32 +315,33 @@ class SetValue(Interaction):
         delta = self.delta_producer.getDelta()
         if not delta:
             return
-        val = min(self.max, max(self.min, self.getter(self.ref) + delta * self.inc))
+        inc = self.accelerated_increment if self.state_producer.getState() else self.increment
+        val = min(self.max, max(self.min, self.getter(self.ref) + delta * inc))
         self.setter(self.ref, val)
 
 
 class Tune(Rotate):
-    def __init__(self, phidget_key, xref, min_value, max_value, inc):
+    def __init__(self, position_producer, xref, min_value, max_value, inc):
         # type: (str, str, Number, Number, Number) -> None
-        Rotate.__init__(self, phidget_key, 10, xref, min_value, max_value, inc)
+        Rotate.__init__(self, position_producer, 10, xref, min_value, max_value, inc)
 
 
 class SetHeading(Rotate):
-    def __init__(self, phidget_key, xref):
+    def __init__(self, position_producer, xref):
         # type: (str, str) -> None
-        Rotate.__init__(self, phidget_key, 2, xref, 0.0, 360.0, 1.0)
+        Rotate.__init__(self, position_producer, 2, xref, 0.0, 360.0, 1.0)
 
 
 class SetBearing(Rotate):
-    def __init__(self, phidget_key, xref):
+    def __init__(self, position_producer, xref):
         # type: (str, str) -> None
-        Rotate.__init__(self, phidget_key, 2, xref, 0.0, 360.0, 1.0)
+        Rotate.__init__(self, position_producer, 2, xref, 0.0, 360.0, 1.0)
 
 
 class Click(Interaction):
-    def __init__(self, phidget_key, xref):
+    def __init__(self, state_producer, xref):
         # type: (str, str) -> None
-        self.click_producer = ClickProducer(self.getPhidget(phidget_key))
+        self.click_producer = ClickProducer(self._getPhidget(state_producer))
         self.ref = XPLMFindCommand(xref)
 
     def tick(self):
