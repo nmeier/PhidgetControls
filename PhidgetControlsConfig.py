@@ -38,10 +38,10 @@ INTERACTIONS = {
     'QNH': lambda: [
         SetValue('E1', None, 'sim/cockpit/misc/barometer_setting', 0.01, None, 27.90, 31.50)],
     'TRANSPONDER': lambda: [
-        SetDigit('E1', 'D1', 'sim/cockpit2/radios/actuators/transponder_code', 4),
-        SetDigit('E1', '!D1', 'sim/cockpit2/radios/actuators/transponder_code', 3),
-        SetDigit('E2', 'D2', 'sim/cockpit2/radios/actuators/transponder_code', 2),
-        SetDigit('E2', '!D2', 'sim/cockpit2/radios/actuators/transponder_code', 1)],
+        SetDigit('E1', '!D1', 'sim/cockpit2/radios/actuators/transponder_code', 4),
+        SetDigit('E1', 'D1', 'sim/cockpit2/radios/actuators/transponder_code', 3),
+        SetDigit('E2', '!D2', 'sim/cockpit2/radios/actuators/transponder_code', 2),
+        SetDigit('E2', 'D2', 'sim/cockpit2/radios/actuators/transponder_code', 1)],
     'APHDG': lambda: [
         SetHeading('E1', 'sim/cockpit/autopilot/heading_mag'),
         SetHeading('E2', 'sim/cockpit/gyros/dg_drift_vac_deg')],

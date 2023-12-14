@@ -148,13 +148,6 @@ class DeltaProducer(object):
         self.position_producer = position_producer
         self.position = None
 
-    def restart(self):
-        # type: () -> None
-        """
-        restart the delta calculation
-        """
-        self.position = None
-
     def getDelta(self):
         # type: () -> int
         new_position = self.position_producer.getPosition()
@@ -201,7 +194,7 @@ class ClickProducer(object):
     def __init__(self, digital_input_producer):
         # type: (StateProducer) -> None
         self.digital_input_producer = digital_input_producer
-        self.state = None
+        self.state = None # type: Union[bool, None]
 
     # get delta change
     def isClicked(self):
@@ -263,9 +256,9 @@ class SetDigit(Interaction):
         self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), 10))
         if if_state_producer:
             if if_state_producer.startswith("!"):
-                self.if_state_producer = NotStateProducer(self._getPhidget(if_state_producer[1:]))
+                self.if_state_producer = self._getPhidget(if_state_producer[1:])
             else:
-                self.if_state_producer = self._getPhidget(if_state_producer)
+                self.if_state_producer = NotStateProducer(self._getPhidget(if_state_producer))
         else:
             self.if_state_producer = TrueStateProducer()
         self.digit = digit
@@ -274,11 +267,10 @@ class SetDigit(Interaction):
         self.setter = XPLMSetDatai
 
     def tick(self):
-        if not self.if_state_producer.getState():
-            self.delta_producer.restart()
-            return
         delta = self.delta_producer.getDelta()
         if not delta:
+            return
+        if self.if_state_producer.getState():
             return
         val = self.getter(self.ref)
         increment_digit = 10 ** (self.digit-1)
