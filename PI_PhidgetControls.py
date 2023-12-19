@@ -31,6 +31,7 @@ from Phidget22.ErrorCode import ErrorCode
 from Phidget22 import Phidget
 from Phidget22.PhidgetException import PhidgetException
 from typing import Type, Optional, Dict, Union
+from operator import add, sub
 import time
 
 # Configuration: Global defaults
@@ -178,13 +179,19 @@ class NotchedPositionProducer(PositionProducer):
         if not new_position:
             return None
 
+        # no change?
+        if new_position == self.position:
+            return int(self.position / self.notch_size)
+
         # check if inside notch
         inside_position = new_position % self.notch_size
         if self.position is None or inside_position < self.notch_size / 2:
+            # if yes, follow producer
             self.position = new_position
         else:
-            # if new_position - old_position > notch_size:
-            pass
+            # if no, follow to the closest notch
+            op = add if new_position < self.position else sub
+            self.position = op(new_position, self.notch_size/2)
 
         # done
         return int(self.position / self.notch_size)
@@ -194,7 +201,7 @@ class ClickProducer(object):
     def __init__(self, digital_input_producer):
         # type: (StateProducer) -> None
         self.digital_input_producer = digital_input_producer
-        self.state = None # type: Union[bool, None]
+        self.state = None  # type: Union[bool, None]
 
     # get delta change
     def isClicked(self):

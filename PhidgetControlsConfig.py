@@ -44,8 +44,17 @@ INTERACTIONS = {
         SetDigit('E2', 'D2', 'sim/cockpit2/radios/actuators/transponder_code', 1)],
     'APHDG': lambda: [
         SetHeading('E1', 'sim/cockpit/autopilot/heading_mag'),
-        SetHeading('E2', 'sim/cockpit/gyros/dg_drift_vac_deg')],
-    'APVERTICALS': lambda: [
-        SetValue('E1', 'D1', 'sim/cockpit/autopilot/altitude', 100.0, 1000, 0, 56000),
-        SetValue('E2', None, 'sim/cockpit/autopilot/vertical_velocity', 100.0, 100.0, -2500, 2500)]
+        SetHeading('E2', 'sim/cockpit/gyros/dg_drift_vac_deg'),
+        Click('D1', 'sim/autopilot/heading'),
+        Click('D1', 'sim/autopilot/heading_hold')],
+    'APALTITUDE': lambda: [
+        SetValue('E1', None, 'sim/cockpit/autopilot/altitude', 1000.0, 1000, 0, 56000),
+        SetValue('E2', None, 'sim/cockpit/autopilot/altitude', 100.0, 1000, 0, 56000),
+        Click('D1', 'sim/autopilot/altitude'),
+        Click('D1', 'sim/autopilot/altitude_hold')],
+    'APVERTSPEED': lambda: [
+        SetValue('E1', None, 'sim/cockpit/autopilot/vertical_velocity', 1000.0, 100.0, -2500, 2500),
+        SetValue('E2', None, 'sim/cockpit/autopilot/vertical_velocity', 100.0, 100.0, -2500, 2500),
+        Click('D1', 'sim/autopilot/vertical_speed_pre_sel'),
+        Click('D2', 'sim/autopilot/vertical_speed')]
 }  # type: Dict[str, Callable[[], List[Interaction]]]
