@@ -22,94 +22,38 @@
     1. File PhidgetControlsConfig.py contains the configuration of phidgets and manipulators
 
 """
+import logging
+from time import time
+from logging import Handler
+from traceback import format_exception, format_exc
+
 from XPLMProcessing import XPLMCreateFlightLoop, XPLMScheduleFlightLoop, XPLMDestroyFlightLoop
 from XPLMDataAccess import XPLMFindDataRef, XPLMGetDatai, XPLMSetDatai, XPLMGetDataf, XPLMSetDataf
 from XPLMUtilities import XPLMDebugString, XPLMFindCommand, XPLMCommandOnce, XPLMCreateCommand, \
     XPLMRegisterCommandHandler, XPLMUnregisterCommandHandler
 from SandyBarbourUtilities import SandyBarbourPrint
-from Phidget22.ErrorCode import ErrorCode
 from Phidget22 import Phidget
 from Phidget22.PhidgetException import PhidgetException
-from typing import Type, Optional, Dict, Union
+from typing import Optional, Union, List
 from operator import add, sub
-import time
+from PhidgetControlsCache import get_phidget, close_all_phidgets, log_phidget_exception, ensure_phidgets_opened
 
 # Configuration: Global defaults
 FLIGHT_LOOP_TIMER = 0.01
-IGNORE_PHIDGET_ERROR = [ErrorCode.EPHIDGET_NOTATTACHED, ErrorCode.EPHIDGET_UNKNOWNVAL]  # type: [int]
+FLIGHT_LOOP_SEQUENCE = 0
+
 Number = Union[float, int]
 
 
-def log(message):
-    # type: (object) -> None
-    XPLMDebugString("" + str(message) + "\n")
-    SandyBarbourPrint("" + str(message))
+class XPlaneLogger(Handler):
 
+    def __init__(self):
+        Handler.__init__(self)
 
-class PhidgetWrapper(object):
-    type_id_2_phidget = {}  # type: Dict[ (type[Phidget], int), Phidget]
-
-    def __init__(self, phidget_type, phidget_id):
-        # type: (Type[Phidget], int) -> None
-        self.last_open = 0
-
-        key = (phidget_type, phidget_id)
-        if key in PhidgetWrapper.type_id_2_phidget:
-            self.wrapped = PhidgetWrapper.type_id_2_phidget[key]
-        else:
-            self.wrapped = phidget_type()
-            self.wrapped.setDeviceSerialNumber(phidget_id)
-            PhidgetWrapper.type_id_2_phidget[key] = self.wrapped
-            PhidgetWrapper.log(self.wrapped, "Instantiated")
-            self.open()
-
-    @staticmethod
-    def closeAll():
-        # type: () -> None
-        log("Closing " + str(len(PhidgetWrapper.type_id_2_phidget)) + " phidgets")
-        for key, wrapped in PhidgetWrapper.type_id_2_phidget.iteritems():
-            try:
-                PhidgetWrapper.log(wrapped, "Closing")
-                wrapped.close()
-            except PhidgetException:
-                pass
-        PhidgetWrapper.type_id_2_phidget.clear()
-
-    def open(self):
-        # is the phidget attached?
-        if self.wrapped.getAttached():
-            return True
-
-        # wait for at least 1s between open()
-        if time.time() - self.last_open < 1:
-            return False
-
-        # try to open/attach
-        self.last_open = time.time()
-        try:
-            PhidgetWrapper.log(self.wrapped, "Opening")
-            self.wrapped.open()
-        except PhidgetException, e:
-            if e.code not in IGNORE_PHIDGET_ERROR:
-                PhidgetWrapper.log(self.wrapped, e.description(), e.code)
-            return False
-
-        # can try
-        return True
-
-    @staticmethod
-    def log(wrapped, message, code=None):
-        # type: (Phidget, str, int) -> None
-        if code:
-            message = message + " (" + str(code) + ")"
-        log("Phidget " + str(wrapped.__class__.__name__) + "#" + str(wrapped.getDeviceSerialNumber()) + ": " + message)
-
-    # Proxy to phidget
-    def __getattr__(self, attr):
-        # ensure open
-        self.open()
-        # pass through
-        return getattr(self.wrapped, attr)
+    def emit(self, record):
+        msg = record.getMessage()
+        XPLMDebugString("%s: %s\n" % ('PhidgetControls', msg))
+        SandyBarbourPrint("%s: %s" % ('PhidgetControls', msg))
 
 
 class PositionProducer(object):
@@ -125,14 +69,46 @@ class StateProducer(object):
         return None
 
 
-class TrueStateProducer(object):
+class RelativePositionProducer(PositionProducer):
+
+    def __init__(self, position_producer):
+        self.position_producer = position_producer
+        self.starting_position = None
+        self.last_position = None
+        self.last_loop_sequence = None
+
+    def getPosition(self):
+
+        # get new position, have none? don't have a position
+        new_position = self.position_producer.getPosition()
+        if not new_position:
+            return None
+
+        # first position? starting offset
+        if not self.starting_position:
+            self.starting_position = new_position
+            self.last_position = new_position
+            self.last_loop_sequence = FLIGHT_LOOP_SEQUENCE
+            return 0
+
+        # are we not in sequence anymore and need to start fresh?
+        if self.last_loop_sequence != FLIGHT_LOOP_SEQUENCE-1:
+            self.starting_position = new_position-(self.last_position-self.starting_position)
+        self.last_loop_sequence = FLIGHT_LOOP_SEQUENCE
+
+        # calculate relative to starting position
+        self.last_position = new_position
+        return new_position - self.starting_position
+
+
+class TrueStateProducer(StateProducer):
     # noinspection PyMethodMayBeStatic
     def getState(self):
         # type: () -> object
         return True
 
 
-class NotStateProducer(object):
+class NotStateProducer(StateProducer):
     def __init__(self, state_producer):
         # type: (StateProducer) -> None
         self.state_producer = state_producer
@@ -147,6 +123,9 @@ class DeltaProducer(object):
     def __init__(self, position_producer):
         # type: (PositionProducer) -> None
         self.position_producer = position_producer
+        self.position = None
+
+    def reset(self):
         self.position = None
 
     def getDelta(self):
@@ -172,6 +151,9 @@ class NotchedPositionProducer(PositionProducer):
         self.notch_size = notch_size
         self.position = None
 
+    def reset(self):
+        self.position = None
+
     # get position
     def getPosition(self):
         # type: () -> Optional[int]
@@ -191,7 +173,7 @@ class NotchedPositionProducer(PositionProducer):
         else:
             # if no, follow to the closest notch
             op = add if new_position < self.position else sub
-            self.position = op(new_position, self.notch_size/2)
+            self.position = op(new_position, self.notch_size / 2)
 
         # done
         return int(self.position / self.notch_size)
@@ -202,40 +184,67 @@ class ClickProducer(object):
         # type: (StateProducer) -> None
         self.digital_input_producer = digital_input_producer
         self.state = None  # type: Union[bool, None]
+        self.first_press = None
 
     # get delta change
     def isClicked(self):
 
         new_state = self.digital_input_producer.getState()
 
-        # calculate click
-        if self.state is None:
-            old_state = new_state
-        else:
-            old_state = self.state
-        self.state = new_state
+        if new_state is None:
+            return None
 
-        # done
-        return not old_state and self.state
+        if new_state == 0:
+            if self.first_press is None:
+                return False
+            result =  time() - self.first_press < 0.2
+            self.first_press = None
+            return result
+        else:
+            if self.first_press is None:
+                self.first_press = time()
+            return 0
 
 
 class Interaction(object):
+
     @staticmethod
     def _getPhidget(phidget):
         # type: ( str ) -> Phidget
         from PhidgetControlsConfig import PHIDGETS
 
         phidget_type, phidget_id = PHIDGETS[phidget]  # type: (type[Phidget], int)
-        return PhidgetWrapper(phidget_type, phidget_id)
+        return get_phidget(phidget_type, phidget_id)
 
     def tick(self):
         pass
 
 
+class If(Interaction):
+    def __init__(self, state_producer, interaction):
+        self.if_state_producer = self._getPhidget(state_producer)
+        self.interaction = interaction
+
+    def tick(self):
+        if self.if_state_producer.getState():
+            self.interaction.tick()
+
+
+class Unless(Interaction):
+    def __init__(self, state_producer, interaction):
+        self.if_state_producer = self._getPhidget(state_producer)
+        self.interaction = interaction
+
+    def tick(self):
+        if not self.if_state_producer.getState():
+            self.interaction.tick()
+
+
 class Rotate(Interaction):
-    def __init__(self, position_producer, notch_size, xref, min_value, max_value, step):
+    def __init__(self, position_producer_id, notch_size, xref, min_value, max_value, step):
         # type: (str, int, str, Number, Number, Number) -> None
-        self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), notch_size))
+        self.delta_producer = DeltaProducer(NotchedPositionProducer(
+            RelativePositionProducer(self._getPhidget(position_producer_id)), notch_size))
         self.min_value = min_value
         self.max_value = max_value
         self.step = step
@@ -258,16 +267,9 @@ class Rotate(Interaction):
 
 
 class SetDigit(Interaction):
-    def __init__(self, position_producer, if_state_producer, xref, digit):
-        # type: (str, Optional[str], str, int) -> None
+    def __init__(self, position_producer, xref, digit):
+        # type: (str, str, int) -> None
         self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), 10))
-        if if_state_producer:
-            if if_state_producer.startswith("!"):
-                self.if_state_producer = self._getPhidget(if_state_producer[1:])
-            else:
-                self.if_state_producer = NotStateProducer(self._getPhidget(if_state_producer))
-        else:
-            self.if_state_producer = TrueStateProducer()
         self.digit = digit
         self.ref = XPLMFindDataRef(xref)
         self.getter = XPLMGetDatai
@@ -277,28 +279,21 @@ class SetDigit(Interaction):
         delta = self.delta_producer.getDelta()
         if not delta:
             return
-        if self.if_state_producer.getState():
-            return
         val = self.getter(self.ref)
-        increment_digit = 10 ** (self.digit-1)
+        increment_digit = 10 ** (self.digit - 1)
         modulo = increment_digit * 10
-        remainder = (val + delta*increment_digit) % modulo
+        remainder = (val + delta * increment_digit) % modulo
         quotient = int(val / modulo) * modulo
         val = quotient + remainder
         self.setter(self.ref, val)
 
 
 class SetValue(Interaction):
-    delta_producer = None  # type: DeltaProducer
 
-    def __init__(self, position_producer, acceleration_state_producer, xref, increment, accelerated_increment,
-                 min_value, max_value):
-        # type: (Phidget, str, Optional[str], str, Number, Optional[Number], Number, Number) -> None
+    def __init__(self, position_producer, xref, increment, min_value, max_value):
+        # type: (Phidget, str, str, Number, Number, Number) -> None
         self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer), 10))
-        self.state_producer = self._getPhidget(acceleration_state_producer) if acceleration_state_producer \
-            else StateProducer()  # type: StateProducer
         self.increment = increment
-        self.accelerated_increment = accelerated_increment
         self.min = min_value
         self.max = max_value
         self.ref = XPLMFindDataRef(xref)
@@ -314,33 +309,32 @@ class SetValue(Interaction):
         delta = self.delta_producer.getDelta()
         if not delta:
             return
-        inc = self.accelerated_increment if self.state_producer.getState() else self.increment
-        val = min(self.max, max(self.min, self.getter(self.ref) + delta * inc))
+        val = min(self.max, max(self.min, self.getter(self.ref) + delta * self.increment))
         self.setter(self.ref, val)
 
 
 class Tune(Rotate):
-    def __init__(self, position_producer, xref, min_value, max_value, inc):
+    def __init__(self, position_producer_id, xref, min_value, max_value, inc):
         # type: (str, str, Number, Number, Number) -> None
-        Rotate.__init__(self, position_producer, 10, xref, min_value, max_value, inc)
+        Rotate.__init__(self, position_producer_id, 10, xref, min_value, max_value, inc)
 
 
 class SetHeading(Rotate):
-    def __init__(self, position_producer, xref):
+    def __init__(self, position_producer_id, xref):
         # type: (str, str) -> None
-        Rotate.__init__(self, position_producer, 2, xref, 0.0, 360.0, 1.0)
+        Rotate.__init__(self, position_producer_id, 2, xref, 0.0, 360.0, 1.0)
 
 
 class SetBearing(Rotate):
-    def __init__(self, position_producer, xref):
+    def __init__(self, position_producer_id, xref):
         # type: (str, str) -> None
-        Rotate.__init__(self, position_producer, 2, xref, 0.0, 360.0, 1.0)
+        Rotate.__init__(self, position_producer_id, 2, xref, 0.0, 360.0, 1.0)
 
 
 class Click(Interaction):
-    def __init__(self, state_producer, xref):
+    def __init__(self, state_producer_id, xref):
         # type: (str, str) -> None
-        self.click_producer = ClickProducer(self._getPhidget(state_producer))
+        self.click_producer = ClickProducer(self._getPhidget(state_producer_id))
         self.ref = XPLMFindCommand(xref)
 
     def tick(self):
@@ -348,82 +342,61 @@ class Click(Interaction):
             XPLMCommandOnce(self.ref)
 
 
-class Command(object):
-    flight_loop = None  # type: FlightLoop
+class UpDown(Interaction):
+    def __init__(self, position_producer_id, up, down):
+        # type: (str, str, str) -> None
+        self.delta_producer = DeltaProducer(NotchedPositionProducer(self._getPhidget(position_producer_id), 20))
+        self.up = XPLMFindCommand(up)
+        self.down = XPLMFindCommand(down)
 
-    def __init__(self, mode, flight_loop, plugin):
-        # type: (str, FlightLoop, PythonInterface) -> None
-        self.mode = mode
-        self.flight_loop = flight_loop
+    def tick(self):
+        delta = self.delta_producer.getDelta()
+        if delta < 0:
+            XPLMCommandOnce(self.up)
+        if delta > 0:
+            XPLMCommandOnce(self.down)
+
+
+class Command(object):
+
+    def __init__(self, key, description, triggered, plugin):
+        # type: (str, str, callable, PythonInterface) -> None
+        self.key = key
+        self.triggered = triggered
         self.plugin = plugin
-        self.cmd = XPLMCreateCommand("fscode/phidgetcontrols/" + mode, "Set current mode to " + mode)
+        self.cmd = XPLMCreateCommand("fscode/phidgetcontrols/" + key, description)
         self.callback = self.handle_callback
-        log("Registering command for mode " + self.mode)
+        logging.debug("Registering command for mode %s", self.key)
         XPLMRegisterCommandHandler(self.plugin, self.cmd, self.callback, 0, 0)
 
     def stop(self):
-        log("Unregistering command for mode " + self.mode)
+        logging.debug("Unregistering command for mode %s", self.key)
         XPLMUnregisterCommandHandler(self.plugin, self.cmd, self.callback, 0, 0)
 
-    def handle_callback(self, _in_command, in_phase, _in_refcon):
+    def handle_callback(self, _in_command, in_phase, _in_reference):
         if in_phase == 0:
-            log('Setting current interactions for ' + self.mode)
-            self.flight_loop.setCurrentMode(self.mode)
-
-
-class FlightLoop:
-
-    def __init__(self, plugin):
-
-        self.plugin = plugin
-
-        # set up commands for modes of interactions
-        self.interactions = []
-
-        from PhidgetControlsConfig import INTERACTIONS
-        self.commands = map(lambda mode: Command(mode, self, plugin), INTERACTIONS.keys())
-
-        # hook-up into X loop
-        log("Registering flight loop")
-        self.loop_callback = self.handle_loop
-        _CreateFlightLoop_t = [1, self.loop_callback, 0]
-        self.loop = XPLMCreateFlightLoop(plugin, _CreateFlightLoop_t)
-        self.loop_timer = FLIGHT_LOOP_TIMER
-        XPLMScheduleFlightLoop(plugin, self.loop, self.loop_timer, 1)
-
-    def handle_loop(self, _elapsed_me, _elapsed_sim, _counter, _refcon):
-        try:
-            for interaction in self.interactions:
-                interaction.tick()
-        except PhidgetException, e:
-            if e.code not in IGNORE_PHIDGET_ERROR:
-                log(e.description + " (" + str(e.code) + ")")
-
-        return FLIGHT_LOOP_TIMER
-
-    def stop(self):
-        log("Unregistering flight loop")
-        XPLMDestroyFlightLoop(self.plugin, self.loop)
-        PhidgetWrapper.closeAll()
-        for command in self.commands:
-            command.stop()
-
-    def setCurrentMode(self, mode):
-        # type: (str) -> None
-        from PhidgetControlsConfig import INTERACTIONS
-        self.interactions = INTERACTIONS[mode]()
+            logging.debug('Triggering command %s', self.key)
+            self.triggered()
 
 
 # Plugin boilerplate
 class PythonInterface:
 
+    interactions = []  # type: List[ Interaction ]
+
     def __init__(self):
-        self.flight_loop = None
         self.Desc = None
         self.Sig = None
         self.Name = None
+        self.commands = []
+        self.interactions = []
+        self.flight_loop = None
 
     def XPluginStart(self):
+
+        logging.root.addHandler(XPlaneLogger())
+        logging.root.setLevel(logging.DEBUG)
+
         # boilerplate
         self.Name = "PhidgetControls"
         self.Sig = "fscode.phidgets"
@@ -431,18 +404,35 @@ class PythonInterface:
             "Plug-in for controlling cockpit functions via Phidgets, for example "
             " radio frequencies on a Phidget Encoder knob.")
 
-        log(self.Name + ": Plugin start")
+        logging.info("Plugin start")
 
-        # set up flight loop
-        self.flight_loop = FlightLoop(self)
+        # set up commands for modes of interactions
+        from PhidgetControlsConfig import INTERACTIONS
+        for (k, d, i) in INTERACTIONS:
+            self.commands.append(Command(k, d, lambda sk=k, si=i: self.setInteractions(sk, si), self))
+
+        # hook-up into X loop
+        logging.debug("Registering flight loop")
+        # self.loop_callback = self.handle_loop
+        _CreateFlightLoop_t = [1, self.handle_loop, 0]
+        self.flight_loop = XPLMCreateFlightLoop(self, _CreateFlightLoop_t)
+        XPLMScheduleFlightLoop(self, self.flight_loop, FLIGHT_LOOP_TIMER, 1)
 
         # complete
         return self.Name, self.Sig, self.Desc
 
     def XPluginStop(self):
-        log(self.Name + ": Plugin stop")
+        logging.info("Plugin stop")
 
-        self.flight_loop.stop()
+        logging.debug("Unregistering flight loop")
+        XPLMDestroyFlightLoop(self, self.flight_loop)
+
+        logging.debug("Close phidgets")
+        close_all_phidgets()
+
+        logging.debug("Unregistering commands")
+        for command in self.commands:
+            command.stop()
 
     # noinspection PyMethodMayBeStatic
     def XPluginEnable(self):
@@ -454,9 +444,27 @@ class PythonInterface:
     def XPluginReceiveMessage(self, _in_from, _in_message, _in_param):
         pass
 
-# import wave
-# import os
-# current_dir = os.getcwd()
-# file_wave_click = os.path.join(current_dir, "Resources/sounds/systems/click.wav")
-# log("Loading "+file_wave_click)
-# self.wave_click = wave.open(str(file_wave_click), 'rb')
+    def handle_loop(self, _elapsed_me, _elapsed_sim, _counter, _reference):
+
+        global FLIGHT_LOOP_SEQUENCE
+        FLIGHT_LOOP_SEQUENCE += 1
+
+        # open all phidgets
+        ensure_phidgets_opened()
+
+        # go through interactions
+        try:
+            for interaction in self.interactions:
+                interaction.tick()
+        except PhidgetException as phidget_exception:
+            log_phidget_exception(phidget_exception)
+        except Exception as exception:
+            logging.exception(exception)
+
+        # continue
+        return FLIGHT_LOOP_TIMER
+
+    def setInteractions(self, mode, new_interactions):
+        # type: (str, List[Interaction]) -> None
+        logging.debug("Setting interactions for %s", mode)
+        self.interactions = new_interactions
